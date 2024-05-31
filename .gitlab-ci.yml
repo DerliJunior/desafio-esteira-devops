@@ -1,0 +1,77 @@
+stages:
+    - build
+    - test
+    - deploy
+
+build:
+  stage: build
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_NAME: nba-app-py
+    IMAGE_TAG: version-app-1.0
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD  | docker login -u $CI_REGISTRY_USER --password-stdin
+
+  script:
+    - docker build -t $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG .
+
+    - echo "Docker - $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG"
+
+    - docker push $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG
+
+test-docker-image:
+  stage: test
+  image: docker:20.10.16
+
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_NAME: nba-app-py
+    IMAGE_TAG: version-app-1.0
+  before_script:
+    - apk update
+    - apk add curl
+    - echo "Efetuando login ao Docker Hub"
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin
+
+  script:
+    - docker run --name nba-repository -d -p 5001:5001 $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG
+    - sleep 20
+    - docker ps
+
+    - CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nba-repository)
+    - echo "IP do container - $CONTAINER_IP"
+
+    - echo "Requisição GET"
+    - docker exec nba-repository curl http://$CONTAINER_IP:5001/v1/resultados_nba
+
+    - docker stop nba-repository
+
+tests-nba-app:
+  stage: test
+  image: python:3
+  before_script:
+    - pip install -r requirements.txt
+  script:
+    - python -m pytest
+
+deploy-ec2:
+  stage: deploy
+  variables:
+    IMAGE_NAME: nba-app-py
+    IMAGE_TAG: version-app-1.0
+  before_script:
+   - chmod 400 $CI_EC2_KEY
+  script:
+    - ssh -T -o StrictHostKeyChecking=no -i $CI_EC2_KEY $CI_EC2_HOST "sudo docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD &&
+                                                                        docker ps -aq | 
+                                                                        xargs docker stop nba | 
+                                                                        xargs docker rm nba &&
+                                                                        xargs docker rmi $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG"
+
+    - ssh -T -o StrictHostKeyChecking=no -i $CI_EC2_KEY $CI_EC2_HOST "sudo docker run --name nba -itd -p 5001:5001 $CI_REGISTRY_USER/$IMAGE_NAME:$IMAGE_TAG"
+
+    - ssh -T -o StrictHostKeyChecking=no -i $CI_EC2_KEY $CI_EC2_HOST "curl http://localhost:5001/v1/resultados_nba"
